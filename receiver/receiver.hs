@@ -15,7 +15,7 @@ import Options.Applicative
 import qualified Data.Vector.Storable as VS 
 import qualified Data.Vector.Storable.Mutable as VSM
 import qualified Data.Vector.Generic as VG 
-import Graphics.Rendering.OpenGL
+import Graphics.Rendering.OpenGL (GLfloat)
 import Data.Tuple
 import qualified Control.Arrow as A
 
@@ -107,6 +107,10 @@ optParser = Options
 opt :: ParserInfo Options
 opt = info (helper <*> optParser) (fullDesc <> progDesc "Draw a dynamic waterall plot of the received spectrum using OpenGL" <> header "RTLSDR Waterfall")
 
+(a :+ b) `cdiv` y = (a/y) :+ (b/y)
+(a :+ b) `cmul` y = (a*y) :+ (b*y)
+normalize x = x `cdiv` magnitude x
+
 pll :: (Num a, RealFloat a, Storable a) => a -> a -> (Complex a, Complex a) -> VS.Vector (Complex a) -> ((Complex a, Complex a), VS.Vector (Complex a)) 
 pll mu muAccum state input = A.first snd $ swap $ vUnfoldr (VS.length input) go (0, state)
     where
@@ -116,8 +120,15 @@ pll mu muAccum state input = A.first snd $ swap $ vUnfoldr (VS.length input) go 
             correction   = (-1) * mu * err
             stateNext    = cis correction * state * accumError
         in (corrected, (offset + 1, (normalize stateNext, normalize $ accumError * cis ((-1) * muAccum * err))))
-    normalize x = x `cdiv` magnitude x
-    (a :+ b) `cdiv` y = (a/y) :+ (b/y)
+
+agc :: (Num a, Storable a, RealFloat a) => a -> a -> a -> VS.Vector (Complex a) -> (a, VS.Vector (Complex a))
+agc mu reference state input = A.first snd $ swap $ vUnfoldr (VS.length input) go (0, state)
+    where
+    go (offset, state) = 
+        let
+            corrected = (input VS.! offset) `cmul` state
+            state'    = state + mu * (reference - magnitude corrected)
+        in  (corrected, (offset + 1, state'))
 
 doIt Options{..} = do
     res <- lift setupGLFW
@@ -138,7 +149,8 @@ doIt Options{..} = do
     lift $ runEffect $   str 
                      >-> P.map interleavedIQUnsignedByteToFloat
                      >-> firResampler matchedFilter 8192
-                     >-> pMapAccum (pll 10 1) (1, 1)
+                     -- >-> pMapAccum (pll 10 1) (1, 1)
+                     >-> pMapAccum (agc 0.0001 0.4) 1
                      -- >-> P.print
                      >-> P.map (VG.zipWith (flip mult) window . VG.zipWith mult (fftFixup fftSize')) 
                      >-> P.map (VG.map (cplxMap (realToFrac :: Float -> CDouble)))
