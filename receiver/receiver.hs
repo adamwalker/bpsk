@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards, ScopedTypeVariables #-}
 
 import Control.Monad.Trans.Either
 import Data.Word
@@ -7,12 +7,14 @@ import Data.Complex
 import Foreign.C.Types
 import Data.Maybe
 import Control.Monad
+import Foreign.Storable
 
 import Pipes as P
-import Pipes.Prelude as P
+import qualified Pipes.Prelude as P
 import Options.Applicative
-import Data.Vector.Storable as VS hiding ((++))
-import Data.Vector.Generic as VG hiding ((++))
+import qualified Data.Vector.Storable as VS 
+import qualified Data.Vector.Storable.Mutable as VSM
+import qualified Data.Vector.Generic as VG 
 import Graphics.Rendering.OpenGL
 
 import SDR.Util as U
@@ -21,6 +23,9 @@ import SDR.FFT
 import SDR.Plot
 import SDR.ArgUtils
 import SDR.PipeUtils
+import SDR.FilterDesign
+import SDR.CPUID
+import SDR.Filter
 import Graphics.DynamicGraph.Waterfall
 import Graphics.DynamicGraph.Util
 
@@ -115,21 +120,27 @@ doIt Options{..} = do
     unless res (left "Unable to initilize GLFW")
 
     let fftSize' =  fromMaybe 8192 fftSize
-        window   =  hanning fftSize' :: VS.Vector CDouble
+        window   =  hanning fftSize' :: VS.Vector Float
     str          <- sdrStream ((defaultRTLSDRParams frequency sampleRate) {tunerGain = gain}) 1 (fromIntegral $ fftSize' * 2)
-    --rfFFT        <- lift $ fftw fftSize'
-    --rfSpectrum   <- plotWaterfall (fromMaybe 1024 windowWidth) (fromMaybe 480 windowHeight) fftSize' (fromMaybe 1000 rows) (fromMaybe jet_mod colorMap)
+    rfFFT        <- lift $ fftw fftSize'
+    rfSpectrum   <- plotWaterfall (fromMaybe 1024 windowWidth) (fromMaybe 480 windowHeight) fftSize' (fromMaybe 1000 rows) (fromMaybe jet_mod colorMap)
     --rfSpectrum   <- plotFill (maybe 1024 id windowWidth) (maybe 480 id windowHeight) fftSize' (maybe jet_mod id colorMap)
     --rfSpectrum   <- plotTexture (maybe 1024 id windowWidth) (maybe 480 id windowHeight) fftSize' fftSize'
 
+    let coeffs :: [Float] = map (*0.125) $ srrc 128 8 0.25
+    info   <- lift getCPUInfo
+    matchedFilter :: Resampler IO VS.Vector VSM.MVector (Complex Float) <- lift $ fastResamplerC info 1 1 coeffs
+
     lift $ runEffect $   str 
-                     >-> P.map (interleavedIQUnsigned256ToFloat :: VS.Vector CUChar -> VS.Vector (Complex CDouble)) 
-                     >-> pMapAccum (pll 10 1) (1, 1)
-                     >-> P.print
-                     -- >-> P.map (VG.zipWith (flip mult) window . VG.zipWith mult (fftFixup fftSize')) 
-                     -- >-> rfFFT 
-                     -- >-> P.map (VG.map ((* (32 / fromIntegral fftSize')) . realToFrac . magnitude)) 
-                     -- >-> rfSpectrum 
+                     >-> P.map interleavedIQUnsignedByteToFloat
+                     -- >-> pMapAccum (pll 10 1) (1, 1)
+                     -- >-> P.print
+                     >-> firResampler matchedFilter 8192
+                     >-> P.map (VG.zipWith (flip mult) window . VG.zipWith mult (fftFixup fftSize')) 
+                     >-> P.map (VG.map (cplxMap (realToFrac :: Float -> CDouble)))
+                     >-> rfFFT 
+                     >-> P.map (VG.map ((* (32 / fromIntegral fftSize')) . realToFrac . magnitude)) 
+                     >-> rfSpectrum 
 
 main = execParser opt >>= eitherT putStrLn return . doIt
 
