@@ -20,6 +20,7 @@ import SDR.RTLSDRStream
 import SDR.FFT
 import SDR.Plot
 import SDR.ArgUtils
+import SDR.PipeUtils
 import Graphics.DynamicGraph.Waterfall
 import Graphics.DynamicGraph.Util
 
