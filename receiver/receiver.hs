@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards, ScopedTypeVariables #-}
+{-# LANGUAGE RecordWildCards, ScopedTypeVariables, FlexibleContexts #-}
 
 import Control.Monad.Trans.Either
 import Data.Word
@@ -116,19 +116,40 @@ pll mu muAccum state input = A.first snd $ swap $ vUnfoldr (VS.length input) go 
     where
     go (offset, (state, accumError)) = 
         let corrected    = state * input VS.! offset
-            err          = realPart corrected * imagPart corrected
+            err          = {- realPart corrected * imagPart corrected -} atan (imagPart corrected / realPart corrected)
             correction   = (-1) * mu * err
             stateNext    = cis correction * state * accumError
         in (corrected, (offset + 1, (normalize stateNext, normalize $ accumError * cis ((-1) * muAccum * err))))
 
-agc :: (Num a, Storable a, RealFloat a) => a -> a -> a -> VS.Vector (Complex a) -> (a, VS.Vector (Complex a))
-agc mu reference state input = A.first snd $ swap $ vUnfoldr (VS.length input) go (0, state)
+thing :: (Monad m, MonadTrans t, Monad (t m)) => m (t m a) -> t m a
+thing = join . lift
+
+coarseFreq :: Int -> Pipe (VS.Vector (Complex CDouble)) Int IO ()
+coarseFreq size =   P.map (VG.map (\x -> x * x)) 
+                >-> P.map (VG.zipWith (flip mult) (hanning size :: VS.Vector CDouble)) 
+                >-> thing (fftw size) 
+                >-> P.map (VG.map magnitude) 
+                >-> P.map VG.maxIndex
+
+freqCorrection :: (VG.Vector v (Complex n), Floating n, Num n)
+               => Int           -- ^ Length of vector
+               -> n             -- ^ Frequency
+               -> v (Complex n)
+freqCorrection size frequency = VG.generate size func
     where
-    go (offset, state) = 
-        let
-            corrected = (input VS.! offset) `cmul` state
-            state'    = state + mu * (reference - magnitude corrected)
-        in  (corrected, (offset + 1, state'))
+    func idx = cis ((fromIntegral idx) * frequency)
+
+correctFreq :: Int -> Pipe (VS.Vector (Complex CDouble)) (VS.Vector (Complex CDouble)) IO ()
+correctFreq size = do
+    theFFT <- lift $ fftw' size
+    let func input = do
+            let squared  = VS.map (\x -> x*x) input
+                windowed = VS.zipWith (flip mult) window squared
+            fftd <- theFFT windowed
+            let maxFreq = VG.maxIndex (VG.map magnitude fftd) `quot` 2
+            return $ VG.zipWith mult (Main.freqCorrection size (-1 * (fromIntegral maxFreq / fromIntegral size) * 2 * pi)) input
+        window = hanning size :: VS.Vector CDouble
+    P.mapM func
 
 doIt Options{..} = do
     res <- lift setupGLFW
@@ -137,10 +158,10 @@ doIt Options{..} = do
     let fftSize' =  fromMaybe 8192 fftSize
         window   =  hanning fftSize' :: VS.Vector Float
     str          <- sdrStream ((defaultRTLSDRParams frequency sampleRate) {tunerGain = gain}) 1 (fromIntegral $ fftSize' * 2)
-    rfFFT        <- lift $ fftw fftSize'
-    rfSpectrum   <- plotWaterfall (fromMaybe 1024 windowWidth) (fromMaybe 480 windowHeight) fftSize' (fromMaybe 1000 rows) (fromMaybe jet_mod colorMap)
+    --rfFFT        <- lift $ fftw fftSize'
+    --rfSpectrum   <- plotWaterfall (fromMaybe 1024 windowWidth) (fromMaybe 480 windowHeight) fftSize' (fromMaybe 1000 rows) (fromMaybe jet_mod colorMap)
     --rfSpectrum   <- plotFill (maybe 1024 id windowWidth) (maybe 480 id windowHeight) fftSize' (maybe jet_mod id colorMap)
-    --rfSpectrum   <- plotTexture (maybe 1024 id windowWidth) (maybe 480 id windowHeight) fftSize' fftSize'
+    --rfSpectrum   <- plotLine (fromMaybe 1024 windowWidth) (fromMaybe 480 windowHeight) fftSize' fftSize'
 
     let coeffs :: [Float] = map (*0.125) $ srrc 128 8 0.25
     info   <- lift getCPUInfo
@@ -148,15 +169,21 @@ doIt Options{..} = do
 
     lift $ runEffect $   str 
                      >-> P.map interleavedIQUnsignedByteToFloat
-                     >-> firResampler matchedFilter 8192
-                     -- >-> pMapAccum (pll 10 1) (1, 1)
-                     >-> pMapAccum (agc 0.0001 0.4) 1
-                     -- >-> P.print
-                     >-> P.map (VG.zipWith (flip mult) window . VG.zipWith mult (fftFixup fftSize')) 
+                     >-> pMapAccum (agc 0.001 0.2) 1
+                     -- >-> firResampler matchedFilter 8192
+                     -- >-> pMapAccum (pll 1 0.2) (1, 1)
+                     
                      >-> P.map (VG.map (cplxMap (realToFrac :: Float -> CDouble)))
-                     >-> rfFFT 
-                     >-> P.map (VG.map ((* (32 / fromIntegral fftSize')) . realToFrac . magnitude)) 
-                     >-> rfSpectrum 
+                     >-> correctFreq 8192
+                     >-> coarseFreq 8192
+                     >-> P.print
+
+                     -- >-> P.map (VG.map (\x -> x*x))
+                     -- >-> P.map (VG.zipWith (flip mult) window . VG.zipWith mult (halfBandUp fftSize')) 
+                     -- >-> P.map (VG.map (cplxMap (realToFrac :: Float -> CDouble)))
+                     -- >-> rfFFT 
+                     -- >-> P.map (VG.map ((* (32 / fromIntegral fftSize')) . realToFrac . magnitude)) 
+                     -- >-> rfSpectrum 
 
 main = execParser opt >>= eitherT putStrLn return . doIt
 
