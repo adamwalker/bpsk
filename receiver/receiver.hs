@@ -146,7 +146,7 @@ correctFreq size = do
             let squared  = VS.map (\x -> x*x) input
                 windowed = VS.zipWith (flip mult) window squared
             fftd <- theFFT windowed
-            let maxFreq = VG.maxIndex (VG.map magnitude fftd) `quot` 2
+            let maxFreq = ((((size `quot` 2) + VG.maxIndex (VG.map magnitude fftd)) `rem` size) - (size `quot` 2)) `quot` 2
             return $ VG.zipWith mult (Main.freqCorrection size (-1 * (fromIntegral maxFreq / fromIntegral size) * 2 * pi)) input
         window = hanning size :: VS.Vector CDouble
     P.mapM func
@@ -156,10 +156,10 @@ doIt Options{..} = do
     unless res (left "Unable to initilize GLFW")
 
     let fftSize' =  fromMaybe 8192 fftSize
-        window   =  hanning fftSize' :: VS.Vector Float
+        window   =  hanning fftSize' :: VS.Vector CDouble
     str          <- sdrStream ((defaultRTLSDRParams frequency sampleRate) {tunerGain = gain}) 1 (fromIntegral $ fftSize' * 2)
-    --rfFFT        <- lift $ fftw fftSize'
-    --rfSpectrum   <- plotWaterfall (fromMaybe 1024 windowWidth) (fromMaybe 480 windowHeight) fftSize' (fromMaybe 1000 rows) (fromMaybe jet_mod colorMap)
+    rfFFT        <- lift $ fftw fftSize'
+    rfSpectrum   <- plotWaterfall (fromMaybe 1024 windowWidth) (fromMaybe 480 windowHeight) fftSize' (fromMaybe 1000 rows) (fromMaybe jet_mod colorMap)
     --rfSpectrum   <- plotFill (maybe 1024 id windowWidth) (maybe 480 id windowHeight) fftSize' (maybe jet_mod id colorMap)
     --rfSpectrum   <- plotLine (fromMaybe 1024 windowWidth) (fromMaybe 480 windowHeight) fftSize' fftSize'
 
@@ -170,20 +170,22 @@ doIt Options{..} = do
     lift $ runEffect $   str 
                      >-> P.map interleavedIQUnsignedByteToFloat
                      >-> pMapAccum (agc 0.001 0.2) 1
-                     -- >-> firResampler matchedFilter 8192
-                     -- >-> pMapAccum (pll 1 0.2) (1, 1)
                      
+                     -- >-> pMapAccum (pll 1 0.2) (1, 1)
+
                      >-> P.map (VG.map (cplxMap (realToFrac :: Float -> CDouble)))
                      >-> correctFreq 8192
-                     >-> coarseFreq 8192
-                     >-> P.print
-
-                     -- >-> P.map (VG.map (\x -> x*x))
-                     -- >-> P.map (VG.zipWith (flip mult) window . VG.zipWith mult (halfBandUp fftSize')) 
-                     -- >-> P.map (VG.map (cplxMap (realToFrac :: Float -> CDouble)))
-                     -- >-> rfFFT 
-                     -- >-> P.map (VG.map ((* (32 / fromIntegral fftSize')) . realToFrac . magnitude)) 
-                     -- >-> rfSpectrum 
+                     -- >-> coarseFreq 8192
+                     -- >-> P.print
+                     --
+                     >-> P.map (VG.map (cplxMap (realToFrac :: CDouble -> Float)))
+                     >-> firResampler matchedFilter 8192
+                     >-> P.map (VG.map (cplxMap (realToFrac :: Float -> CDouble)))
+                     
+                     >-> P.map (VG.zipWith (flip mult) window . VG.zipWith mult (halfBandUp fftSize')) 
+                     >-> rfFFT 
+                     >-> P.map (VG.map ((* (32 / fromIntegral fftSize')) . realToFrac . magnitude)) 
+                     >-> rfSpectrum 
 
 main = execParser opt >>= eitherT putStrLn return . doIt
 
