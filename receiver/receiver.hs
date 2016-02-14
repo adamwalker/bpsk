@@ -121,13 +121,10 @@ pll mu muAccum state input = A.first snd $ swap $ vUnfoldr (VS.length input) go 
             stateNext    = cis correction * state * accumError
         in (corrected, (offset + 1, (normalize stateNext, normalize $ accumError * cis ((-1) * muAccum * err))))
 
-thing :: (Monad m, MonadTrans t, Monad (t m)) => m (t m a) -> t m a
-thing = join . lift
-
 coarseFreq :: Int -> Pipe (VS.Vector (Complex CDouble)) Int IO ()
 coarseFreq size =   P.map (VG.map (\x -> x * x)) 
                 >-> P.map (VG.zipWith (flip mult) (hanning size :: VS.Vector CDouble)) 
-                >-> thing (fftw size) 
+                >-> combineInit (fftw size) 
                 >-> P.map (VG.map magnitude) 
                 >-> P.map VG.maxIndex
 
